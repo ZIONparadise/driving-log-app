@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import Font
+from openpyxl.formatting.rule import FormulaRule
 
 
 TARGET_SHEET_KEYWORD = "운행기록부"
@@ -98,6 +99,27 @@ def find_period(df):
     return start, end
 
 
+def get_korean_month(period_start, source_filename=""):
+    """
+    period_start 또는 파일명에서 월을 추출해 '5월' 형식으로 반환합니다.
+    """
+    if period_start:
+        m = re.search(r"\d{4}[./-](\d{1,2})[./-]\d{1,2}", period_start)
+        if m:
+            return f"{int(m.group(1))}월"
+
+    m = re.search(r"\d{4}[-./](\d{1,2})[-./]\d{1,2}", source_filename)
+    if m:
+        return f"{int(m.group(1))}월"
+
+    return "업데이트"
+
+
+def make_download_filename(period_start, source_filename=""):
+    month_label = get_korean_month(period_start, source_filename)
+    return f"업무용운행기록부_30th_홍성학_{month_label}.xlsx"
+
+
 def calculate_distance_values(start_km, end_km, commute):
     distance = None
     business = None
@@ -169,6 +191,42 @@ def get_target_sheet(wb):
     return wb.active
 
 
+def add_conditional_formatting(ws):
+    """
+    다운로드 후 엑셀에서 값을 수정해도 논리 오류가 빨간색으로 표시되도록
+    조건부 서식을 수식 기반으로 적용합니다.
+    """
+    red_font_rule_ko = Font(color="FF0000", bold=True)
+
+    for row_num in range(START_ROW, END_ROW + 1):
+        # 주행후거리(O) < 주행전거리(K)이면 K/O/S 빨간색
+        rule_distance_order = FormulaRule(
+            formula=[f'=AND(ISNUMBER($K{row_num}),ISNUMBER($O{row_num}),$O{row_num}<$K{row_num})'],
+            font=red_font_rule_ko,
+        )
+        ws.conditional_formatting.add(f"K{row_num}", rule_distance_order)
+        ws.conditional_formatting.add(f"O{row_num}", rule_distance_order)
+        ws.conditional_formatting.add(f"S{row_num}", rule_distance_order)
+
+        # 출퇴근용(W)이 주행거리(S)보다 크면 S/W/AA 빨간색
+        rule_commute_over = FormulaRule(
+            formula=[f'=AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),$W{row_num}>$S{row_num})'],
+            font=red_font_rule_ko,
+        )
+        ws.conditional_formatting.add(f"S{row_num}", rule_commute_over)
+        ws.conditional_formatting.add(f"W{row_num}", rule_commute_over)
+        ws.conditional_formatting.add(f"AA{row_num}", rule_commute_over)
+
+        # 출퇴근용 + 일반업무용 != 주행거리이면 S/W/AA 빨간색
+        rule_usage_sum = FormulaRule(
+            formula=[f'=AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),ISNUMBER($AA{row_num}),$W{row_num}+$AA{row_num}<>$S{row_num})'],
+            font=red_font_rule_ko,
+        )
+        ws.conditional_formatting.add(f"S{row_num}", rule_usage_sum)
+        ws.conditional_formatting.add(f"W{row_num}", rule_usage_sum)
+        ws.conditional_formatting.add(f"AA{row_num}", rule_usage_sum)
+
+
 def update_template(template_file, source_file):
     period_start, period_end, records = extract_records(source_file)
 
@@ -199,13 +257,6 @@ def update_template(template_file, source_file):
             and rec["end_km"] < rec["start_km"]
         )
 
-        invalid_usage_sum = (
-            rec["distance"] is not None
-            and rec["commute"] is not None
-            and rec["business"] is not None
-            and rec["commute"] + rec["business"] != rec["distance"]
-        )
-
         invalid_commute_over_distance = (
             rec["distance"] is not None
             and rec["commute"] is not None
@@ -228,35 +279,45 @@ def update_template(template_file, source_file):
         set_cell_value(ws, f"H{row_num}", rec["name"])
         set_cell_value(ws, f"K{row_num}", rec["start_km"])
         set_cell_value(ws, f"O{row_num}", rec["end_km"])
-        set_cell_value(ws, f"S{row_num}", rec["distance"])
+
+        # 핵심 변경:
+        # 7번 주행거리와 9번 일반 업무용은 숫자 고정값이 아니라 엑셀 수식으로 입력
+        # 다운로드 후 엑셀에서 K/O/W 값을 수정해도 자동 재계산됩니다.
+        set_cell_value(ws, f"S{row_num}", f"=IF(OR(K{row_num}=\"\",O{row_num}=\"\"),\"\",O{row_num}-K{row_num})")
         set_cell_value(ws, f"W{row_num}", rec["commute"])
-        set_cell_value(ws, f"AA{row_num}", rec["business"])
+        set_cell_value(ws, f"AA{row_num}", f"=IF(OR(S{row_num}=\"\",W{row_num}=\"\"),\"\",S{row_num}-W{row_num})")
+
         set_cell_value(ws, f"AE{row_num}", rec["note"])
 
-        # 빨간색 표시 규칙
-        # 1. 주행후 < 주행전이면 5, 6, 7번 숫자 셀을 빨간색 표시
+        # 초기 데이터 자체가 이미 이상한 경우에도 열자마자 빨간 글씨가 보이도록 직접 표시
+        # 이후 사용자가 수정하면 조건부 서식이 계속 작동합니다.
         if invalid_distance_order:
             for cell in [f"K{row_num}", f"O{row_num}", f"S{row_num}"]:
                 apply_red_font(ws, cell)
 
-        # 2. 출퇴근용이 전체 주행거리보다 크면 7, 8, 9번 숫자 셀을 빨간색 표시
-        if invalid_commute_over_distance or invalid_usage_sum:
+        if invalid_commute_over_distance:
             for cell in [f"S{row_num}", f"W{row_num}", f"AA{row_num}"]:
                 apply_red_font(ws, cell)
 
     for row_num in range(START_ROW + len(records), END_ROW + 1):
-        set_cell_value(ws, f"S{row_num}", 0)
+        set_cell_value(ws, f"S{row_num}", f"=IF(OR(K{row_num}=\"\",O{row_num}=\"\"),\"\",O{row_num}-K{row_num})")
         set_cell_value(ws, f"W{row_num}", 0)
-        set_cell_value(ws, f"AA{row_num}", 0)
+        set_cell_value(ws, f"AA{row_num}", f"=IF(OR(S{row_num}=\"\",W{row_num}=\"\"),\"\",S{row_num}-W{row_num})")
 
-    set_cell_value(ws, "K63", "=SUM(S15:V61)")
-    set_cell_value(ws, "W63", "=SUM(W15:AA61)")
+    # 합계 및 비율도 수식 유지
+    set_cell_value(ws, "K63", "=SUM(S15:S61)")
+    set_cell_value(ws, "W63", "=SUM(W15:W61)")
     set_cell_value(ws, "AE63", "=IFERROR(W63/K63,0)")
+
+    add_conditional_formatting(ws)
 
     output = BytesIO()
     wb.save(output)
     output.seek(0)
-    return output, records, period_start, period_end, validation_warnings
+
+    download_filename = make_download_filename(period_start, getattr(source_file, "name", ""))
+
+    return output, records, period_start, period_end, validation_warnings, download_filename
 
 
 def style_preview(row):
@@ -286,6 +347,7 @@ st.title("업무용승용차 운행기록부 자동 업데이트")
 st.write("제출해야 하는 운행기록부 양식과 다운로드 받은 운행내역 파일을 업로드하면 자동으로 내용을 채웁니다.")
 
 st.caption("자동 계산 규칙: 7번 주행거리 = 6번 주행후거리 - 5번 주행전거리 / 9번 일반 업무용 = 7번 주행거리 - 8번 출퇴근용")
+st.caption("다운로드된 엑셀 파일 안에도 수식이 들어가므로, 주행전/주행후/출퇴근용 값을 수정하면 자동으로 재계산됩니다.")
 
 template_file = st.file_uploader("1. 제출 양식 파일 업로드 (.xlsx)", type=["xlsx"])
 source_file = st.file_uploader("2. 다운로드 받은 운행내역 파일 업로드 (.xls 또는 .xlsx)", type=["xls", "xlsx"])
@@ -293,7 +355,7 @@ source_file = st.file_uploader("2. 다운로드 받은 운행내역 파일 업�
 if template_file and source_file:
     if st.button("운행기록부 업데이트"):
         try:
-            output, records, period_start, period_end, validation_warnings = update_template(template_file, source_file)
+            output, records, period_start, period_end, validation_warnings, download_filename = update_template(template_file, source_file)
 
             if len(records) == 0:
                 st.warning("운행내역을 찾지 못했습니다. 다운로드 파일의 표 구조가 예상과 다를 수 있습니다.")
@@ -302,6 +364,8 @@ if template_file and source_file:
 
             if period_start and period_end:
                 st.caption(f"과세기간: {period_start} ~ {period_end}")
+
+            st.caption(f"저장 파일명: {download_filename}")
 
             if validation_warnings:
                 st.warning("검산 확인이 필요한 항목이 있습니다. 다운로드된 엑셀에서도 해당 숫자가 빨간색으로 표시됩니다.")
@@ -317,7 +381,7 @@ if template_file and source_file:
             st.download_button(
                 label="업데이트된 엑셀 다운로드",
                 data=output,
-                file_name="업무용운행기록부_업데이트.xlsx",
+                file_name=download_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception as e:
