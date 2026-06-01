@@ -5,7 +5,6 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-
 TARGET_SHEET_KEYWORD = "운행기록부"
 START_ROW = 15
 END_ROW = 61
@@ -22,6 +21,38 @@ def to_int(value):
     return int(float(text))
 
 
+def read_source_excel(source_file):
+    """Read .xls/.xlsx driving log files robustly."""
+    source_file.seek(0)
+    filename = source_file.name.lower()
+
+    if filename.endswith(".xls"):
+        try:
+            source_file.seek(0)
+            return pd.read_excel(
+                source_file,
+                header=None,
+                dtype=object,
+                engine="xlrd",
+                engine_kwargs={"ignore_workbook_corruption": True},
+            )
+        except Exception:
+            # Some downloaded .xls files are actually HTML tables.
+            source_file.seek(0)
+            raw = source_file.read()
+            try:
+                html_text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                html_text = raw.decode("cp949", errors="ignore")
+            tables = pd.read_html(html_text)
+            if not tables:
+                raise ValueError("운행내역 표를 찾을 수 없습니다.")
+            return tables[0]
+
+    source_file.seek(0)
+    return pd.read_excel(source_file, header=None, dtype=object, engine="openpyxl")
+
+
 def find_period(df):
     text = " ".join(str(x) for x in df.values.flatten() if not pd.isna(x))
     m = re.search(r"(\d{4}[./-]\d{2}[./-]\d{2})\s*~\s*(\d{4}[./-]\d{2}[./-]\d{2})", text)
@@ -33,7 +64,7 @@ def find_period(df):
 
 
 def extract_records(source_file):
-    df = pd.read_excel(source_file, header=None, dtype=object)
+    df = read_source_excel(source_file)
     period_start, period_end = find_period(df)
 
     records = []
@@ -89,6 +120,7 @@ def get_target_sheet(wb):
 def update_template(template_file, source_file):
     period_start, period_end, records = extract_records(source_file)
 
+    template_file.seek(0)
     wb = load_workbook(template_file)
     ws = get_target_sheet(wb)
 
@@ -97,13 +129,11 @@ def update_template(template_file, source_file):
     if period_end:
         ws["E5"] = period_end
 
-    # Clear old detail rows
     target_cols = ["A", "D", "E", "H", "K", "O", "S", "W", "AA", "AE"]
     for row_num in range(START_ROW, END_ROW + 1):
         for col in target_cols:
             ws[f"{col}{row_num}"] = None
 
-    # Write new records
     for i, rec in enumerate(records):
         row_num = START_ROW + i
         if row_num > END_ROW:
@@ -120,7 +150,6 @@ def update_template(template_file, source_file):
         ws[f"AA{row_num}"] = rec["business"]
         ws[f"AE{row_num}"] = rec["note"]
 
-    # Keep blank rows safe for totals
     for row_num in range(START_ROW + len(records), END_ROW + 1):
         ws[f"S{row_num}"] = 0
         ws[f"AA{row_num}"] = 0
@@ -136,7 +165,6 @@ def update_template(template_file, source_file):
 
 
 st.title("업무용승용차 운행기록부 자동 업데이트")
-
 st.write("제출해야 하는 운행기록부 양식과 다운로드 받은 운행내역 파일을 업로드하면 자동으로 내용을 채웁니다.")
 
 template_file = st.file_uploader("1. 제출 양식 파일 업로드 (.xlsx)", type=["xlsx"])
@@ -147,7 +175,11 @@ if template_file and source_file:
         try:
             output, records, period_start, period_end = update_template(template_file, source_file)
 
-            st.success(f"업데이트 완료: {len(records)}건")
+            if len(records) == 0:
+                st.warning("운행내역을 찾지 못했습니다. 다운로드 파일의 표 구조가 예상과 다를 수 있습니다.")
+            else:
+                st.success(f"업데이트 완료: {len(records)}건")
+
             if period_start and period_end:
                 st.caption(f"과세기간: {period_start} ~ {period_end}")
 
@@ -162,6 +194,7 @@ if template_file and source_file:
             )
         except Exception as e:
             st.error("처리 중 오류가 발생했습니다.")
+            st.write("다운로드 받은 .xls 파일이 비표준 형식이거나 손상된 경우일 수 있습니다.")
             st.exception(e)
 else:
     st.info("먼저 제출 양식과 운행내역 파일을 모두 업로드해 주세요.")
