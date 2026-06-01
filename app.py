@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
+
 TARGET_SHEET_KEYWORD = "운행기록부"
 START_ROW = 15
 END_ROW = 61
@@ -21,8 +22,26 @@ def to_int(value):
     return int(float(text))
 
 
+def set_cell_value(ws, cell_address, value):
+    """
+    병합 셀 내부 주소가 들어와도 실제 쓰기 가능한 병합 영역의
+    왼쪽 위 셀에 값을 입력합니다.
+    """
+    target = ws[cell_address]
+
+    for merged_range in ws.merged_cells.ranges:
+        if target.coordinate in merged_range:
+            top_left = ws.cell(
+                row=merged_range.min_row,
+                column=merged_range.min_col
+            )
+            top_left.value = value
+            return
+
+    target.value = value
+
+
 def read_source_excel(source_file):
-    """Read .xls/.xlsx driving log files robustly."""
     source_file.seek(0)
     filename = source_file.name.lower()
 
@@ -37,7 +56,6 @@ def read_source_excel(source_file):
                 engine_kwargs={"ignore_workbook_corruption": True},
             )
         except Exception:
-            # Some downloaded .xls files are actually HTML tables.
             source_file.seek(0)
             raw = source_file.read()
             try:
@@ -125,38 +143,38 @@ def update_template(template_file, source_file):
     ws = get_target_sheet(wb)
 
     if period_start:
-        ws["E2"] = period_start
+        set_cell_value(ws, "E2", period_start)
     if period_end:
-        ws["E5"] = period_end
+        set_cell_value(ws, "E5", period_end)
 
     target_cols = ["A", "D", "E", "H", "K", "O", "S", "W", "AA", "AE"]
     for row_num in range(START_ROW, END_ROW + 1):
         for col in target_cols:
-            ws[f"{col}{row_num}"] = None
+            set_cell_value(ws, f"{col}{row_num}", None)
 
     for i, rec in enumerate(records):
         row_num = START_ROW + i
         if row_num > END_ROW:
             break
 
-        ws[f"A{row_num}"] = rec["date"]
-        ws[f"D{row_num}"] = rec["weekday"]
-        ws[f"E{row_num}"] = rec["dept"]
-        ws[f"H{row_num}"] = rec["name"]
-        ws[f"K{row_num}"] = rec["start_km"]
-        ws[f"O{row_num}"] = rec["end_km"]
-        ws[f"S{row_num}"] = rec["distance"]
-        ws[f"W{row_num}"] = rec["commute"]
-        ws[f"AA{row_num}"] = rec["business"]
-        ws[f"AE{row_num}"] = rec["note"]
+        set_cell_value(ws, f"A{row_num}", rec["date"])
+        set_cell_value(ws, f"D{row_num}", rec["weekday"])
+        set_cell_value(ws, f"E{row_num}", rec["dept"])
+        set_cell_value(ws, f"H{row_num}", rec["name"])
+        set_cell_value(ws, f"K{row_num}", rec["start_km"])
+        set_cell_value(ws, f"O{row_num}", rec["end_km"])
+        set_cell_value(ws, f"S{row_num}", rec["distance"])
+        set_cell_value(ws, f"W{row_num}", rec["commute"])
+        set_cell_value(ws, f"AA{row_num}", rec["business"])
+        set_cell_value(ws, f"AE{row_num}", rec["note"])
 
     for row_num in range(START_ROW + len(records), END_ROW + 1):
-        ws[f"S{row_num}"] = 0
-        ws[f"AA{row_num}"] = 0
+        set_cell_value(ws, f"S{row_num}", 0)
+        set_cell_value(ws, f"AA{row_num}", 0)
 
-    ws["K63"] = "=SUM(S15:V61)"
-    ws["W63"] = "=SUM(W15:AA61)"
-    ws["AE63"] = "=IFERROR(W63/K63,0)"
+    set_cell_value(ws, "K63", "=SUM(S15:V61)")
+    set_cell_value(ws, "W63", "=SUM(W15:AA61)")
+    set_cell_value(ws, "AE63", "=IFERROR(W63/K63,0)")
 
     output = BytesIO()
     wb.save(output)
@@ -165,6 +183,7 @@ def update_template(template_file, source_file):
 
 
 st.title("업무용승용차 운행기록부 자동 업데이트")
+
 st.write("제출해야 하는 운행기록부 양식과 다운로드 받은 운행내역 파일을 업로드하면 자동으로 내용을 채웁니다.")
 
 template_file = st.file_uploader("1. 제출 양식 파일 업로드 (.xlsx)", type=["xlsx"])
@@ -194,7 +213,6 @@ if template_file and source_file:
             )
         except Exception as e:
             st.error("처리 중 오류가 발생했습니다.")
-            st.write("다운로드 받은 .xls 파일이 비표준 형식이거나 손상된 경우일 수 있습니다.")
             st.exception(e)
 else:
     st.info("먼저 제출 양식과 운행내역 파일을 모두 업로드해 주세요.")
