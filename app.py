@@ -27,10 +27,6 @@ def to_int(value):
 
 
 def set_cell_value(ws, cell_address, value, font=None):
-    """
-    병합 셀 내부 주소가 들어와도 실제 쓰기 가능한 병합 영역의
-    왼쪽 위 셀에 값을 입력합니다.
-    """
     target = ws[cell_address]
 
     for merged_range in ws.merged_cells.ranges:
@@ -100,9 +96,6 @@ def find_period(df):
 
 
 def get_korean_month(period_start, source_filename=""):
-    """
-    period_start 또는 파일명에서 월을 추출해 '5월' 형식으로 반환합니다.
-    """
     if period_start:
         m = re.search(r"\d{4}[./-](\d{1,2})[./-]\d{1,2}", period_start)
         if m:
@@ -192,39 +185,45 @@ def get_target_sheet(wb):
 
 
 def add_conditional_formatting(ws):
-    """
-    다운로드 후 엑셀에서 값을 수정해도 논리 오류가 빨간색으로 표시되도록
-    조건부 서식을 수식 기반으로 적용합니다.
-    """
-    red_font_rule_ko = Font(color="FF0000", bold=True)
+    red_font_rule = Font(color="FF0000", bold=True)
 
     for row_num in range(START_ROW, END_ROW + 1):
-        # 주행후거리(O) < 주행전거리(K)이면 K/O/S 빨간색
         rule_distance_order = FormulaRule(
-            formula=[f'=AND(ISNUMBER($K{row_num}),ISNUMBER($O{row_num}),$O{row_num}<$K{row_num})'],
-            font=red_font_rule_ko,
+            formula=[f'AND(ISNUMBER($K{row_num}),ISNUMBER($O{row_num}),$O{row_num}<$K{row_num})'],
+            font=red_font_rule,
         )
         ws.conditional_formatting.add(f"K{row_num}", rule_distance_order)
         ws.conditional_formatting.add(f"O{row_num}", rule_distance_order)
         ws.conditional_formatting.add(f"S{row_num}", rule_distance_order)
 
-        # 출퇴근용(W)이 주행거리(S)보다 크면 S/W/AA 빨간색
         rule_commute_over = FormulaRule(
-            formula=[f'=AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),$W{row_num}>$S{row_num})'],
-            font=red_font_rule_ko,
+            formula=[f'AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),$W{row_num}>$S{row_num})'],
+            font=red_font_rule,
         )
         ws.conditional_formatting.add(f"S{row_num}", rule_commute_over)
         ws.conditional_formatting.add(f"W{row_num}", rule_commute_over)
         ws.conditional_formatting.add(f"AA{row_num}", rule_commute_over)
 
-        # 출퇴근용 + 일반업무용 != 주행거리이면 S/W/AA 빨간색
         rule_usage_sum = FormulaRule(
-            formula=[f'=AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),ISNUMBER($AA{row_num}),$W{row_num}+$AA{row_num}<>$S{row_num})'],
-            font=red_font_rule_ko,
+            formula=[f'AND(ISNUMBER($S{row_num}),ISNUMBER($W{row_num}),ISNUMBER($AA{row_num}),$W{row_num}+$AA{row_num}<>$S{row_num})'],
+            font=red_font_rule,
         )
         ws.conditional_formatting.add(f"S{row_num}", rule_usage_sum)
         ws.conditional_formatting.add(f"W{row_num}", rule_usage_sum)
         ws.conditional_formatting.add(f"AA{row_num}", rule_usage_sum)
+
+
+def enable_excel_recalculation(wb):
+    """
+    openpyxl은 수식 결과값을 직접 계산하지 않습니다.
+    따라서 Excel에서 파일을 열 때 자동 계산되도록 설정합니다.
+    """
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+        wb.calculation.calcMode = "auto"
+    except Exception:
+        pass
 
 
 def update_template(template_file, source_file):
@@ -232,6 +231,7 @@ def update_template(template_file, source_file):
 
     template_file.seek(0)
     wb = load_workbook(template_file)
+    enable_excel_recalculation(wb)
     ws = get_target_sheet(wb)
 
     if period_start:
@@ -280,17 +280,15 @@ def update_template(template_file, source_file):
         set_cell_value(ws, f"K{row_num}", rec["start_km"])
         set_cell_value(ws, f"O{row_num}", rec["end_km"])
 
-        # 핵심 변경:
-        # 7번 주행거리와 9번 일반 업무용은 숫자 고정값이 아니라 엑셀 수식으로 입력
-        # 다운로드 후 엑셀에서 K/O/W 값을 수정해도 자동 재계산됩니다.
-        set_cell_value(ws, f"S{row_num}", f"=IF(OR(K{row_num}=\"\",O{row_num}=\"\"),\"\",O{row_num}-K{row_num})")
+        # 핵심 수정:
+        # 복잡한 IF 수식 대신 단순 수식을 사용합니다.
+        # Excel에서 값 수정 시 바로 재계산됩니다.
+        set_cell_value(ws, f"S{row_num}", f"=O{row_num}-K{row_num}")
         set_cell_value(ws, f"W{row_num}", rec["commute"])
-        set_cell_value(ws, f"AA{row_num}", f"=IF(OR(S{row_num}=\"\",W{row_num}=\"\"),\"\",S{row_num}-W{row_num})")
+        set_cell_value(ws, f"AA{row_num}", f"=S{row_num}-W{row_num}")
 
         set_cell_value(ws, f"AE{row_num}", rec["note"])
 
-        # 초기 데이터 자체가 이미 이상한 경우에도 열자마자 빨간 글씨가 보이도록 직접 표시
-        # 이후 사용자가 수정하면 조건부 서식이 계속 작동합니다.
         if invalid_distance_order:
             for cell in [f"K{row_num}", f"O{row_num}", f"S{row_num}"]:
                 apply_red_font(ws, cell)
@@ -300,11 +298,12 @@ def update_template(template_file, source_file):
                 apply_red_font(ws, cell)
 
     for row_num in range(START_ROW + len(records), END_ROW + 1):
-        set_cell_value(ws, f"S{row_num}", f"=IF(OR(K{row_num}=\"\",O{row_num}=\"\"),\"\",O{row_num}-K{row_num})")
-        set_cell_value(ws, f"W{row_num}", 0)
-        set_cell_value(ws, f"AA{row_num}", f"=IF(OR(S{row_num}=\"\",W{row_num}=\"\"),\"\",S{row_num}-W{row_num})")
+        set_cell_value(ws, f"K{row_num}", None)
+        set_cell_value(ws, f"O{row_num}", None)
+        set_cell_value(ws, f"S{row_num}", None)
+        set_cell_value(ws, f"W{row_num}", None)
+        set_cell_value(ws, f"AA{row_num}", None)
 
-    # 합계 및 비율도 수식 유지
     set_cell_value(ws, "K63", "=SUM(S15:S61)")
     set_cell_value(ws, "W63", "=SUM(W15:W61)")
     set_cell_value(ws, "AE63", "=IFERROR(W63/K63,0)")
